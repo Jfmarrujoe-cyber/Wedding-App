@@ -101,6 +101,25 @@
 
     .form-group { margin-bottom: 28px; }
 
+    #uploadCard { display: none; }
+
+    .gate-hint {
+      font-family: 'Cormorant Garamond', serif;
+      font-style: italic;
+      font-size: 1rem;
+      color: #6b645c;
+      text-align: center;
+      margin-bottom: 28px;
+    }
+
+    .gate-error {
+      color: #c97878;
+      font-size: 0.85rem;
+      text-align: center;
+      margin: -8px 0 20px;
+      min-height: 1.1em;
+    }
+
     label {
       display: block;
       font-size: 0.75rem;
@@ -361,6 +380,16 @@
       <p class="description">Upload photos and videos from our special day. Every moment you captured helps us relive the joy.</p>
     </div>
 
+    <div class="card" id="gateCard">
+      <p class="gate-hint">Please enter the code from your invitation to continue.</p>
+      <div class="form-group">
+        <label for="accessCodeInput">Access Code</label>
+        <input type="text" id="accessCodeInput" placeholder="Enter code" maxlength="20" autocomplete="off" autocapitalize="characters">
+      </div>
+      <div class="gate-error" id="gateError"></div>
+      <button class="submit-btn" id="gateSubmitBtn">Continue</button>
+    </div>
+
     <div class="card" id="uploadCard">
       <div class="form-group">
         <label for="uploaderName">Your Name <span style="text-transform:none;letter-spacing:0;color:#bbb;font-weight:300;">(optional)</span></label>
@@ -416,6 +445,56 @@
     const MAX_RETRIES = 5;
 
     let selectedFiles = [];
+
+    // ===== Access code gate =====
+    const ACCESS_CODE_KEY = 'weddingAccessCode';
+    const gateCard = document.getElementById('gateCard');
+    const gateError = document.getElementById('gateError');
+    const accessCodeInput = document.getElementById('accessCodeInput');
+    const gateSubmitBtn = document.getElementById('gateSubmitBtn');
+
+    function showUploadForm() {
+      gateCard.style.display = 'none';
+      uploadCard.style.display = 'block';
+    }
+
+    function submitAccessCode() {
+      const code = accessCodeInput.value.trim();
+      if (!code) {
+        gateError.textContent = 'Please enter your code.';
+        return;
+      }
+      gateError.textContent = '';
+      gateSubmitBtn.disabled = true;
+      gateSubmitBtn.textContent = 'Checking...';
+      google.script.run
+        .withSuccessHandler((result) => {
+          gateSubmitBtn.disabled = false;
+          gateSubmitBtn.textContent = 'Continue';
+          if (result.success) {
+            sessionStorage.setItem(ACCESS_CODE_KEY, code);
+            showUploadForm();
+          } else {
+            gateError.textContent = result.error || 'Incorrect code.';
+          }
+        })
+        .withFailureHandler(() => {
+          gateSubmitBtn.disabled = false;
+          gateSubmitBtn.textContent = 'Continue';
+          gateError.textContent = 'Something went wrong. Please try again.';
+        })
+        .validateAccessCode(code);
+    }
+
+    gateSubmitBtn.addEventListener('click', submitAccessCode);
+    accessCodeInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitAccessCode();
+    });
+
+    // Skip the gate if this browser tab already entered a code this session.
+    if (sessionStorage.getItem(ACCESS_CODE_KEY)) {
+      showUploadForm();
+    }
 
     dropZone.addEventListener('click', () => fileInput.click());
 
@@ -652,7 +731,8 @@
             fileName: file.name,
             mimeType: file.type || 'application/octet-stream',
             fileSize: file.size,
-            uploaderName: uploaderName.value.trim()
+            uploaderName: uploaderName.value.trim(),
+            accessCode: sessionStorage.getItem(ACCESS_CODE_KEY) || ''
           });
       });
     }

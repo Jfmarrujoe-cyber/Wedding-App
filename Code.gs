@@ -47,37 +47,6 @@ function checkUploadStatus(uploadUrl, totalSize) {
       },
       muteHttpExceptions: true
     });
-    /**
- * Proxies a chunk upload from the browser to Drive.
- * The browser can't PUT directly to googleapis.com due to CORS,
- * so it sends the chunk (base64-encoded) to us and we forward it.
- */
-function uploadChunkProxy(uploadUrl, base64Data, start, end, total) {
-  try {
-    const bytes = Utilities.base64Decode(base64Data);
-    const response = UrlFetchApp.fetch(uploadUrl, {
-      method: 'put',
-      contentType: 'application/octet-stream',
-      headers: {
-        'Content-Range': 'bytes ' + start + '-' + end + '/' + total
-      },
-      payload: bytes,
-      muteHttpExceptions: true
-    });
-
-    const code = response.getResponseCode();
-    // 200/201 = whole file complete, 308 = chunk accepted more to come
-    if (code === 200 || code === 201 || code === 308) {
-      return { success: true, status: code };
-    }
-    return {
-      success: false,
-      error: 'Drive returned ' + code + ': ' + response.getContentText().substring(0, 200)
-    };
-  } catch (error) {
-    return { success: false, error: 'Proxy error: ' + error.message };
-  }
-}
 
     const code = response.getResponseCode();
 
@@ -109,11 +78,81 @@ function uploadChunkProxy(uploadUrl, base64Data, start, end, total) {
 }
 
 /**
+ * Proxies a chunk upload from the browser to Drive.
+ * The browser can't PUT directly to googleapis.com due to CORS,
+ * so it sends the chunk (base64-encoded) to us and we forward it.
+ */
+function uploadChunkProxy(uploadUrl, base64Data, start, end, total) {
+  try {
+    const bytes = Utilities.base64Decode(base64Data);
+    const response = UrlFetchApp.fetch(uploadUrl, {
+      method: 'put',
+      contentType: 'application/octet-stream',
+      headers: {
+        'Content-Range': 'bytes ' + start + '-' + end + '/' + total
+      },
+      payload: bytes,
+      muteHttpExceptions: true
+    });
+
+    const code = response.getResponseCode();
+    // 200/201 = whole file complete, 308 = chunk accepted more to come
+    if (code === 200 || code === 201 || code === 308) {
+      return { success: true, status: code };
+    }
+    return {
+      success: false,
+      error: 'Drive returned ' + code + ': ' + response.getContentText().substring(0, 200)
+    };
+  } catch (error) {
+    return { success: false, error: 'Proxy error: ' + error.message };
+  }
+}
+
+/**
+ * Validates a guest-entered access code against the ACCESS_CODE script
+ * property. If ACCESS_CODE_EXPIRES (format yyyy-MM-dd) is set and has
+ * passed, the code is rejected even if it matches — this is how the code
+ * stops working after the wedding. If ACCESS_CODE isn't configured at all,
+ * the site is open to anyone (no code required).
+ */
+function validateAccessCode(code) {
+  const props = PropertiesService.getScriptProperties();
+  const correctCode = props.getProperty('ACCESS_CODE');
+
+  if (!correctCode) {
+    return { success: true };
+  }
+
+  const expires = props.getProperty('ACCESS_CODE_EXPIRES');
+  if (expires) {
+    const expiryDate = new Date(expires + 'T23:59:59');
+    if (Date.now() > expiryDate.getTime()) {
+      return { success: false, error: 'This access code has expired.' };
+    }
+  }
+
+  if (!code || code.trim().toUpperCase() !== correctCode.trim().toUpperCase()) {
+    return { success: false, error: 'Incorrect code. Please try again.' };
+  }
+
+  return { success: true };
+}
+
+/**
  * Called by the frontend to request a resumable upload session.
  * Returns an upload URL the browser can PUT file data to directly.
  */
 function createUploadSession(fileInfo) {
   try {
+    // Re-validate the access code here too — the gate screen is just UX,
+    // this is the real enforcement point since it's what actually creates
+    // a Drive upload session.
+    const accessCheck = validateAccessCode(fileInfo.accessCode);
+    if (!accessCheck.success) {
+      return { success: false, error: accessCheck.error };
+    }
+
     const props = PropertiesService.getScriptProperties();
     const folderId = props.getProperty('FOLDER_ID');
 
@@ -303,6 +342,11 @@ function testSetup() {
   Logger.log('FOLDER_ID: ' + (folderId ? '✓ set' : '✗ MISSING'));
   Logger.log('SERVICE_ACCOUNT_EMAIL: ' + (email ? '✓ ' + email : '✗ MISSING'));
   Logger.log('SERVICE_ACCOUNT_PRIVATE_KEY: ' + (key ? '✓ set (' + key.length + ' chars)' : '✗ MISSING'));
+
+  const accessCode = props.getProperty('ACCESS_CODE');
+  const accessExpires = props.getProperty('ACCESS_CODE_EXPIRES');
+  Logger.log('ACCESS_CODE: ' + (accessCode ? '✓ set' : '(not set — site is open to anyone with the link)'));
+  if (accessCode && accessExpires) Logger.log('ACCESS_CODE_EXPIRES: ' + accessExpires);
 
   if (!folderId || !email || !key) {
     Logger.log('✗ Fix missing Script Properties first.');
