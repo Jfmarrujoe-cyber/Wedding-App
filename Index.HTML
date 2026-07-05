@@ -101,25 +101,6 @@
 
     .form-group { margin-bottom: 28px; }
 
-    #uploadCard { display: none; }
-
-    .gate-hint {
-      font-family: 'Cormorant Garamond', serif;
-      font-style: italic;
-      font-size: 1rem;
-      color: #6b645c;
-      text-align: center;
-      margin-bottom: 28px;
-    }
-
-    .gate-error {
-      color: #c97878;
-      font-size: 0.85rem;
-      text-align: center;
-      margin: -8px 0 20px;
-      min-height: 1.1em;
-    }
-
     label {
       display: block;
       font-size: 0.75rem;
@@ -378,6 +359,98 @@
       .card { padding: 28px 20px; }
       .drop-zone { padding: 36px 16px; }
     }
+
+    /* ===== Slideshow ===== */
+    .slideshow-launch { text-align: center; margin-top: 18px; }
+
+    .slideshow-link {
+      background: none;
+      border: none;
+      color: var(--gold);
+      font-family: 'Jost', sans-serif;
+      font-size: 0.72rem;
+      letter-spacing: 0.25em;
+      text-transform: uppercase;
+      cursor: pointer;
+      padding: 6px 4px;
+      border-bottom: 1px solid transparent;
+      transition: border-color 0.3s ease, letter-spacing 0.3s ease;
+    }
+    .slideshow-link:hover { border-bottom-color: var(--gold); letter-spacing: 0.3em; }
+
+    .slideshow {
+      position: fixed;
+      inset: 0;
+      background: #1a1917;
+      z-index: 1000;
+      display: none;
+      overflow: hidden;
+    }
+    .slideshow.active { display: block; }
+
+    .slideshow-slide {
+      position: absolute;
+      inset: 0;
+      background-position: center;
+      background-repeat: no-repeat;
+      background-size: contain;
+      opacity: 0;
+      transition: opacity 1.2s ease-in-out;
+    }
+    .slideshow-slide.visible { opacity: 1; }
+
+    /* Soft vignette to frame the photos */
+    .slideshow-vignette {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 1001;
+      box-shadow: inset 0 0 180px 60px rgba(0, 0, 0, 0.55);
+    }
+
+    .slideshow-exit {
+      position: absolute;
+      top: 18px;
+      right: 20px;
+      z-index: 1002;
+      width: 46px;
+      height: 46px;
+      border-radius: 50%;
+      background: rgba(0, 0, 0, 0.35);
+      color: rgba(255, 255, 255, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      font-size: 1.5rem;
+      line-height: 1;
+      cursor: pointer;
+      transition: background 0.2s ease;
+    }
+    .slideshow-exit:hover { background: rgba(0, 0, 0, 0.6); }
+
+    .slideshow-message {
+      position: absolute;
+      inset: 0;
+      z-index: 1002;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 24px;
+      color: rgba(255, 255, 255, 0.85);
+    }
+    .slideshow-message .big {
+      font-family: 'Cormorant Garamond', serif;
+      font-style: italic;
+      font-size: 1.9rem;
+      margin-bottom: 10px;
+    }
+    .slideshow-message .small {
+      font-family: 'Jost', sans-serif;
+      font-size: 0.72rem;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.55);
+    }
   </style>
 </head>
 <body>
@@ -391,16 +464,6 @@
       <h1>Share Your <em>Memories</em></h1>
       <div class="subtitle">A Wedding Keepsake</div>
       <p class="description">Upload photos and videos from our special day. Every moment you captured helps us relive the joy.</p>
-    </div>
-
-    <div class="card" id="gateCard">
-      <p class="gate-hint">Please enter the code from your invitation to continue.</p>
-      <div class="form-group">
-        <label for="accessCodeInput">Access Code</label>
-        <input type="text" id="accessCodeInput" placeholder="Enter code" maxlength="20" autocomplete="off" autocapitalize="characters">
-      </div>
-      <div class="gate-error" id="gateError"></div>
-      <button class="submit-btn" id="gateSubmitBtn">Continue</button>
     </div>
 
     <div class="card" id="uploadCard">
@@ -439,6 +502,19 @@
     </div>
 
     <div class="footer">with love</div>
+
+    <div class="slideshow-launch">
+      <button class="slideshow-link" id="slideshowStart">✦ View the Slideshow</button>
+    </div>
+  </div>
+
+  <!-- Fullscreen random slideshow of the uploaded photos -->
+  <div class="slideshow" id="slideshow">
+    <div class="slideshow-slide" id="slideA"></div>
+    <div class="slideshow-slide" id="slideB"></div>
+    <div class="slideshow-vignette"></div>
+    <button class="slideshow-exit" id="slideshowExit" aria-label="Exit slideshow">×</button>
+    <div class="slideshow-message" id="slideshowMessage" style="display:none;"></div>
   </div>
 
   <script>
@@ -466,56 +542,6 @@
     const PHOTO_CONCURRENCY = 3;
 
     let selectedFiles = [];
-
-    // ===== Access code gate =====
-    const ACCESS_CODE_KEY = 'weddingAccessCode';
-    const gateCard = document.getElementById('gateCard');
-    const gateError = document.getElementById('gateError');
-    const accessCodeInput = document.getElementById('accessCodeInput');
-    const gateSubmitBtn = document.getElementById('gateSubmitBtn');
-
-    function showUploadForm() {
-      gateCard.style.display = 'none';
-      uploadCard.style.display = 'block';
-    }
-
-    function submitAccessCode() {
-      const code = accessCodeInput.value.trim();
-      if (!code) {
-        gateError.textContent = 'Please enter your code.';
-        return;
-      }
-      gateError.textContent = '';
-      gateSubmitBtn.disabled = true;
-      gateSubmitBtn.textContent = 'Checking...';
-      google.script.run
-        .withSuccessHandler((result) => {
-          gateSubmitBtn.disabled = false;
-          gateSubmitBtn.textContent = 'Continue';
-          if (result.success) {
-            sessionStorage.setItem(ACCESS_CODE_KEY, code);
-            showUploadForm();
-          } else {
-            gateError.textContent = result.error || 'Incorrect code.';
-          }
-        })
-        .withFailureHandler(() => {
-          gateSubmitBtn.disabled = false;
-          gateSubmitBtn.textContent = 'Continue';
-          gateError.textContent = 'Something went wrong. Please try again.';
-        })
-        .validateAccessCode(code);
-    }
-
-    gateSubmitBtn.addEventListener('click', submitAccessCode);
-    accessCodeInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') submitAccessCode();
-    });
-
-    // Skip the gate if this browser tab already entered a code this session.
-    if (sessionStorage.getItem(ACCESS_CODE_KEY)) {
-      showUploadForm();
-    }
 
     dropZone.addEventListener('click', () => fileInput.click());
 
@@ -788,8 +814,7 @@
             fileName: file.name,
             mimeType: file.type || 'application/octet-stream',
             fileSize: file.size,
-            uploaderName: uploaderName.value.trim(),
-            accessCode: sessionStorage.getItem(ACCESS_CODE_KEY) || ''
+            uploaderName: uploaderName.value.trim()
           });
       });
     }
@@ -860,6 +885,158 @@
       successMessage.classList.remove('active');
       uploadCard.style.display = 'block';
       updateSubmitButton();
+    }
+
+    // ============================================================
+    //  Slideshow — shows the uploaded photos in a random order.
+    //  Photos live in a private shared drive, so we can't point an
+    //  <img> straight at them; the server hands us each photo as a
+    //  data URL (see getSlideshowImage in Code.gs).
+    // ============================================================
+    const SLIDE_INTERVAL = 6000;              // how long each photo is shown (ms)
+    const SLIDE_REFRESH_INTERVAL = 3 * 60000; // re-check for newly uploaded photos (ms)
+    const SLIDE_CACHE_MAX = 40;               // how many photos to keep in memory
+
+    const slideshow = document.getElementById('slideshow');
+    const slideshowStart = document.getElementById('slideshowStart');
+    const slideshowExit = document.getElementById('slideshowExit');
+    const slideshowMessage = document.getElementById('slideshowMessage');
+    const slideLayers = [document.getElementById('slideA'), document.getElementById('slideB')];
+
+    let slideIds = [];          // all photo IDs
+    let slideQueue = [];        // shuffled IDs left to show this pass
+    let slideActiveLayer = 0;   // which of the two layers is currently visible
+    let slideTimer = null;
+    let slideRefreshTimer = null;
+    let slideRunning = false;
+    let pendingImage = null;    // prefetch of the next photo
+    let slideAdvancing = false; // guard against overlapping ticks on a slow fetch
+    const slideCache = new Map();
+
+    slideshowStart.addEventListener('click', openSlideshow);
+    slideshowExit.addEventListener('click', closeSlideshow);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && slideRunning) closeSlideshow();
+    });
+
+    function showSlideMessage(big, small) {
+      slideshowMessage.innerHTML =
+        '<div class="big">' + big + '</div>' +
+        (small ? '<div class="small">' + small + '</div>' : '');
+      slideshowMessage.style.display = 'flex';
+    }
+    function hideSlideMessage() { slideshowMessage.style.display = 'none'; }
+
+    async function openSlideshow() {
+      slideshow.classList.add('active');
+      slideRunning = true;
+      slideLayers.forEach(l => { l.style.backgroundImage = ''; l.classList.remove('visible'); });
+      slideActiveLayer = 0;
+      showSlideMessage('Gathering your memories…', 'One moment');
+
+      await loadSlideIds();
+      if (!slideRunning) return; // exited during load
+
+      if (slideIds.length === 0) {
+        showSlideMessage('No photos yet', 'Uploaded photos will appear here');
+        return;
+      }
+
+      hideSlideMessage();
+      queueNextImage();
+      await advanceSlide();
+      slideTimer = setInterval(advanceSlide, SLIDE_INTERVAL);
+      slideRefreshTimer = setInterval(loadSlideIds, SLIDE_REFRESH_INTERVAL);
+    }
+
+    function closeSlideshow() {
+      slideRunning = false;
+      slideshow.classList.remove('active');
+      if (slideTimer) { clearInterval(slideTimer); slideTimer = null; }
+      if (slideRefreshTimer) { clearInterval(slideRefreshTimer); slideRefreshTimer = null; }
+    }
+
+    function loadSlideIds() {
+      return new Promise((resolve) => {
+        google.script.run
+          .withSuccessHandler((result) => {
+            if (result && result.success) slideIds = result.ids || [];
+            resolve();
+          })
+          .withFailureHandler(() => resolve())
+          .getSlideshowPhotos();
+      });
+    }
+
+    function shuffle(arr) {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+      }
+      return arr;
+    }
+
+    // Draw the next ID from a shuffled queue; reshuffle (folding in any newly
+    // uploaded photos) once every photo has been shown, so there are no repeats
+    // until the whole set has cycled.
+    function nextSlideId() {
+      if (slideQueue.length === 0) slideQueue = shuffle(slideIds.slice());
+      return slideQueue.shift();
+    }
+
+    // Prefetch the next photo while the current one is on screen, so the
+    // crossfade is instant instead of waiting on the server each time.
+    function queueNextImage() {
+      const id = nextSlideId();
+      if (!id) { pendingImage = Promise.resolve(null); return; }
+      const cached = slideCache.get(id);
+      if (cached) { pendingImage = Promise.resolve({ id: id, dataUrl: cached }); return; }
+      pendingImage = fetchSlideImage(id).then((dataUrl) => {
+        if (!dataUrl) return null;
+        slideCache.set(id, dataUrl);
+        if (slideCache.size > SLIDE_CACHE_MAX) {
+          slideCache.delete(slideCache.keys().next().value);
+        }
+        return { id: id, dataUrl: dataUrl };
+      });
+    }
+
+    async function advanceSlide() {
+      if (!slideRunning || slideAdvancing) return;
+      slideAdvancing = true;
+      try {
+        const ready = await pendingImage; // photo prefetched last tick
+        queueNextImage();                 // start prefetching the following one
+        if (!slideRunning || !ready) return; // skip a failed fetch; try again next tick
+
+        await preloadImage(ready.dataUrl);
+        if (!slideRunning) return;
+
+        const nextLayer = 1 - slideActiveLayer;
+        slideLayers[nextLayer].style.backgroundImage = 'url("' + ready.dataUrl + '")';
+        slideLayers[nextLayer].classList.add('visible');
+        slideLayers[slideActiveLayer].classList.remove('visible');
+        slideActiveLayer = nextLayer;
+      } finally {
+        slideAdvancing = false;
+      }
+    }
+
+    function fetchSlideImage(id) {
+      return new Promise((resolve) => {
+        google.script.run
+          .withSuccessHandler((result) => resolve(result && result.success ? result.dataUrl : null))
+          .withFailureHandler(() => resolve(null))
+          .getSlideshowImage(id);
+      });
+    }
+
+    function preloadImage(dataUrl) {
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = img.onerror = () => resolve();
+        img.src = dataUrl;
+      });
     }
   </script>
 </body>

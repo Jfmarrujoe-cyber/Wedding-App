@@ -110,33 +110,114 @@ function uploadChunkProxy(uploadUrl, base64Data, start, end, total) {
 }
 
 /**
- * Validates a guest-entered access code against the ACCESS_CODE script
- * property. If ACCESS_CODE_EXPIRES (format yyyy-MM-dd) is set and has
- * passed, the code is rejected even if it matches — this is how the code
- * stops working after the wedding. If ACCESS_CODE isn't configured at all,
- * the site is open to anyone (no code required).
+ * Returns the IDs of all uploaded photos (images only) in the folder, in a
+ * random order, for the slideshow. Videos are skipped. The frontend then
+ * asks for each image one at a time via getSlideshowImage().
  */
-function validateAccessCode(code) {
-  const props = PropertiesService.getScriptProperties();
-  const correctCode = props.getProperty('ACCESS_CODE');
+function getSlideshowPhotos() {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const folderId = props.getProperty('FOLDER_ID');
+    if (!folderId) return { success: false, error: 'Server not configured (missing FOLDER_ID).' };
 
-  if (!correctCode) {
-    return { success: true };
-  }
+    const token = getServiceAccountAccessToken();
+    let ids = [];
+    let pageToken = '';
 
-  const expires = props.getProperty('ACCESS_CODE_EXPIRES');
-  if (expires) {
-    const expiryDate = new Date(expires + 'T23:59:59');
-    if (Date.now() > expiryDate.getTime()) {
-      return { success: false, error: 'This access code has expired.' };
+    do {
+      const q = "'" + folderId + "' in parents and mimeType contains 'image/' and trashed = false";
+      const url = 'https://www.googleapis.com/drive/v3/files'
+        + '?q=' + encodeURIComponent(q)
+        + '&fields=nextPageToken,files(id)'
+        + '&pageSize=1000'
+        + '&orderBy=createdTime desc'
+        + '&supportsAllDrives=true&includeItemsFromAllDrives=true&corpora=allDrives'
+        + (pageToken ? '&pageToken=' + pageToken : '');
+
+      const resp = UrlFetchApp.fetch(url, {
+        headers: { 'Authorization': 'Bearer ' + token },
+        muteHttpExceptions: true
+      });
+
+      if (resp.getResponseCode() !== 200) {
+        return { success: false, error: 'Could not list photos: ' + resp.getContentText().substring(0, 200) };
+      }
+
+      const data = JSON.parse(resp.getContentText());
+      (data.files || []).forEach(function (f) { ids.push(f.id); });
+      pageToken = data.nextPageToken || '';
+    } while (pageToken);
+
+    // Shuffle so the slideshow order is random (Fisher–Yates).
+    for (let i = ids.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = ids[i]; ids[i] = ids[j]; ids[j] = tmp;
     }
-  }
 
-  if (!code || code.trim().toUpperCase() !== correctCode.trim().toUpperCase()) {
-    return { success: false, error: 'Incorrect code. Please try again.' };
+    return { success: true, ids: ids };
+  } catch (error) {
+    return { success: false, error: 'Server error: ' + error.message };
   }
+}
 
-  return { success: true };
+/**
+ * Returns one photo as a base64 data URL the browser can drop straight into
+ * an <img>. We proxy the bytes through Apps Script because the files live in
+ * a private shared drive — they aren't publicly viewable, so the browser
+ * can't load them directly. We prefer Drive's thumbnail (upscaled to a
+ * slideshow-friendly size) to keep it fast, and fall back to the full image.
+ */
+function getSlideshowImage(fileId) {
+  try {
+    const token = getServiceAccountAccessToken();
+
+    // Ask Drive for a thumbnail URL + the mime type.
+    const metaUrl = 'https://www.googleapis.com/drive/v3/files/' + fileId
+      + '?fields=thumbnailLink,mimeType&supportsAllDrives=true';
+    const metaResp = UrlFetchApp.fetch(metaUrl, {
+      headers: { 'Authorization': 'Bearer ' + token },
+      muteHttpExceptions: true
+    });
+    if (metaResp.getResponseCode() !== 200) {
+      return { success: false, error: 'Could not read photo: ' + metaResp.getResponseCode() };
+    }
+    const meta = JSON.parse(metaResp.getContentText());
+
+    let blob = null;
+
+    // Try the thumbnail first, upscaled (…=s220 → …=s1600) for a crisp display.
+    if (meta.thumbnailLink) {
+      const thumbUrl = meta.thumbnailLink.replace(/=s\d+(-c)?$/, '=s1600');
+      const thumbResp = UrlFetchApp.fetch(thumbUrl, {
+        headers: { 'Authorization': 'Bearer ' + token },
+        muteHttpExceptions: true
+      });
+      if (thumbResp.getResponseCode() === 200) {
+        blob = thumbResp.getBlob();
+      }
+    }
+
+    // Fall back to the full-resolution file if the thumbnail wasn't available
+    // (e.g. Drive hasn't generated one for a just-uploaded photo yet).
+    if (!blob) {
+      const mediaUrl = 'https://www.googleapis.com/drive/v3/files/' + fileId
+        + '?alt=media&supportsAllDrives=true';
+      const mediaResp = UrlFetchApp.fetch(mediaUrl, {
+        headers: { 'Authorization': 'Bearer ' + token },
+        muteHttpExceptions: true
+      });
+      if (mediaResp.getResponseCode() !== 200) {
+        return { success: false, error: 'Could not load photo: ' + mediaResp.getResponseCode() };
+      }
+      blob = mediaResp.getBlob();
+    }
+
+    const contentType = blob.getContentType() || meta.mimeType || 'image/jpeg';
+    const dataUrl = 'data:' + contentType + ';base64,' + Utilities.base64Encode(blob.getBytes());
+    return { success: true, dataUrl: dataUrl };
+  } catch (error) {
+    return { success: false, error: 'Server error: ' + error.message };
+  }
 }
 
 /**
@@ -145,14 +226,6 @@ function validateAccessCode(code) {
  */
 function createUploadSession(fileInfo) {
   try {
-    // Re-validate the access code here too — the gate screen is just UX,
-    // this is the real enforcement point since it's what actually creates
-    // a Drive upload session.
-    const accessCheck = validateAccessCode(fileInfo.accessCode);
-    if (!accessCheck.success) {
-      return { success: false, error: accessCheck.error };
-    }
-
     const props = PropertiesService.getScriptProperties();
     const folderId = props.getProperty('FOLDER_ID');
 
@@ -342,11 +415,6 @@ function testSetup() {
   Logger.log('FOLDER_ID: ' + (folderId ? '✓ set' : '✗ MISSING'));
   Logger.log('SERVICE_ACCOUNT_EMAIL: ' + (email ? '✓ ' + email : '✗ MISSING'));
   Logger.log('SERVICE_ACCOUNT_PRIVATE_KEY: ' + (key ? '✓ set (' + key.length + ' chars)' : '✗ MISSING'));
-
-  const accessCode = props.getProperty('ACCESS_CODE');
-  const accessExpires = props.getProperty('ACCESS_CODE_EXPIRES');
-  Logger.log('ACCESS_CODE: ' + (accessCode ? '✓ set' : '(not set — site is open to anyone with the link)'));
-  if (accessCode && accessExpires) Logger.log('ACCESS_CODE_EXPIRES: ' + accessExpires);
 
   if (!folderId || !email || !key) {
     Logger.log('✗ Fix missing Script Properties first.');
