@@ -453,9 +453,11 @@
     const successMessage = document.getElementById('successMessage');
 
     // Chunk size for resumable upload — must be a multiple of 256 KB per Drive API.
-    // Bigger chunks = fewer slow round trips through Apps Script. 10 MB is a good
-    // balance; if very large chunks ever start failing, drop this back to 5 MB.
-    const CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB
+    // Bigger chunks = fewer round trips AND less TCP "cold start" per chunk, which
+    // helps a bit on bandwidth-limited connections. 15 MB is about as high as is
+    // safe given the base64 payload passed through Apps Script; if large videos
+    // ever start failing to upload, drop this back to 10 MB (or 5 MB).
+    const CHUNK_SIZE = 15 * 1024 * 1024; // 15 MB
     const MAX_RETRIES = 5;
 
     // How many photos to upload at once. Photos are small and latency-bound,
