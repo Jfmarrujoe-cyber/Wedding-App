@@ -518,6 +518,13 @@
   </div>
 
   <script>
+    // ============================================================
+    //  CONFIGURATION — paste your Apps Script web app URL here.
+    //  Get it from: Apps Script → Deploy → Manage deployments →
+    //  copy the Web app URL (it ends in "/exec").
+    // ============================================================
+    const API_URL = 'PASTE_YOUR_APPS_SCRIPT_EXEC_URL_HERE';
+
     const dropZone = document.getElementById('dropZone');
     const fileInput = document.getElementById('fileInput');
     const fileList = document.getElementById('fileList');
@@ -529,12 +536,36 @@
     const successMessage = document.getElementById('successMessage');
 
     // Chunk size for resumable upload — must be a multiple of 256 KB per Drive API.
-    // Bigger chunks = fewer round trips AND less TCP "cold start" per chunk, which
-    // helps a bit on bandwidth-limited connections. 15 MB is about as high as is
-    // safe given the base64 payload passed through Apps Script; if large videos
-    // ever start failing to upload, drop this back to 10 MB (or 5 MB).
-    const CHUNK_SIZE = 15 * 1024 * 1024; // 15 MB
+    // The browser now uploads chunks straight to Drive (no base64, no proxy), so
+    // we can use big chunks: fewer round trips = faster. 16 MB is a good balance
+    // between speed and the cost of re-sending a chunk if one fails on flaky wifi.
+    const CHUNK_SIZE = 16 * 1024 * 1024; // 16 MB
     const MAX_RETRIES = 5;
+
+    // ---- JSONP helper: calls the Apps Script API without CORS headaches ----
+    let _jsonpCounter = 0;
+    function jsonp(action, params) {
+      return new Promise((resolve, reject) => {
+        const cbName = '__jsonp_cb_' + (++_jsonpCounter);
+        const script = document.createElement('script');
+        let timer;
+        function cleanup() {
+          clearTimeout(timer);
+          delete window[cbName];
+          if (script.parentNode) script.parentNode.removeChild(script);
+        }
+        window[cbName] = (data) => { cleanup(); resolve(data); };
+        script.onerror = () => { cleanup(); reject(new Error('Could not reach the server')); };
+        timer = setTimeout(() => { cleanup(); reject(new Error('The server took too long to respond')); }, 60000);
+
+        const query = Object.keys(params || {})
+          .map(k => encodeURIComponent(k) + '=' + encodeURIComponent(params[k]))
+          .join('&');
+        script.src = API_URL + '?action=' + encodeURIComponent(action) +
+          (query ? '&' + query : '') + '&callback=' + cbName;
+        document.body.appendChild(script);
+      });
+    }
 
     // How many photos to upload at once. Photos are small and latency-bound,
     // so uploading a few in parallel is much faster for a batch. Videos are
@@ -738,61 +769,52 @@
     }
 
     /**
-     * Resumable chunked upload. Steps:
-     *   1. Ask Apps Script for a fresh upload URL
-     *   2. PUT the file to that URL in chunks, proxied through Apps Script's
-     *      uploadChunkProxy. The proxy reads Drive's response code for us
-     *      (200/201 = done, 308 = chunk accepted), so we can trust its result
-     *      directly — no separate status-check round trip needed.
-     * The old code did a second round trip after every chunk to ask Drive how
-     * many bytes it had; that doubled the time and is gone now. We only fall
-     * back to a status query on the rare retry path, to see how far Drive got.
+     * Resumable chunked upload — the fast path.
+     *   1. Ask the Apps Script API (JSONP) for a fresh Drive upload URL.
+     *   2. PUT each chunk of raw bytes DIRECTLY to Drive from the browser.
+     *      No base64, no proxy, no double-hop. Drive replies 200/201 when the
+     *      whole file is done and 308 ("resume incomplete") after each chunk.
+     *   xhr.upload.onprogress gives us a real, smooth progress bar.
      */
     async function uploadFileResumable(item) {
-      // Step 1: get upload URL from Apps Script
+      // Step 1: get a Drive upload URL from our tiny API.
       const session = await getUploadSession(item.file);
       const uploadUrl = session.uploadUrl;
       const totalSize = item.file.size;
 
-      // Step 2: stream chunks
+      // Step 2: stream chunks straight to Drive.
       let offset = 0;
       while (offset < totalSize) {
         const end = Math.min(offset + CHUNK_SIZE, totalSize);
         const chunk = item.file.slice(offset, end);
-
-        // Show the animated "working" bar while this chunk is in flight —
-        // we can't measure sub-chunk progress, so this avoids a dead 0%.
-        item.inflight = true;
-        updateFileProgress(item);
+        const chunkStart = offset;
 
         let attempt = 0;
-        let sent = false;
+        let status = 0;
         let lastError = null;
 
-        while (attempt < MAX_RETRIES && !sent) {
+        while (attempt < MAX_RETRIES && status === 0) {
           try {
-            // The proxy confirms Drive accepted the chunk (200/201/308).
-            await sendChunk(uploadUrl, chunk, offset, end - 1, totalSize);
-            sent = true;
+            status = await putChunk(uploadUrl, chunk, chunkStart, end - 1, totalSize, (loaded) => {
+              // Live progress within this chunk.
+              item.progress = ((chunkStart + loaded) / totalSize) * 100;
+              updateFileProgress(item);
+            });
+            // 200/201 = whole file done, 308 = chunk accepted, keep going.
+            if (status !== 200 && status !== 201 && status !== 308) {
+              throw new Error('Drive responded ' + status);
+            }
           } catch (err) {
             lastError = err;
+            status = 0;
             attempt++;
             if (attempt < MAX_RETRIES) {
               await sleep(1000 * Math.pow(2, attempt - 1));
-              // Maybe the chunk actually landed before the error — ask Drive
-              // how far it got so we don't needlessly re-send a big chunk.
-              try {
-                const received = await queryUploadStatus(uploadUrl, totalSize);
-                if (received >= end) { sent = true; break; }
-              } catch (e) { /* keep retrying */ }
             }
           }
         }
 
-        item.inflight = false;
-
-        if (!sent) {
-          updateFileProgress(item);
+        if (status === 0) {
           throw lastError || new Error('Chunk upload failed');
         }
 
@@ -802,75 +824,33 @@
       }
     }
 
+    // Ask the API to mint a Drive resumable upload session.
     function getUploadSession(file) {
-      return new Promise((resolve, reject) => {
-        google.script.run
-          .withSuccessHandler((result) => {
-            if (result.success) resolve(result);
-            else reject(new Error(result.error || 'Failed to create upload session'));
-          })
-          .withFailureHandler((err) => reject(err))
-          .createUploadSession({
-            fileName: file.name,
-            mimeType: file.type || 'application/octet-stream',
-            fileSize: file.size,
-            uploaderName: uploaderName.value.trim()
-          });
+      return jsonp('createSession', {
+        fileName: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        fileSize: file.size,
+        uploaderName: uploaderName.value.trim()
+      }).then((result) => {
+        if (result && result.success) return result;
+        throw new Error((result && result.error) || 'Failed to create upload session');
       });
     }
 
-    /**
-     * Send one chunk to Apps Script's proxy, which forwards it to Drive and
-     * returns whether Drive accepted it.
-     */
-    async function sendChunk(uploadUrl, chunkBlob, start, end, total) {
-      // Read the chunk as base64 so we can send it through Apps Script
-      const base64 = await blobToBase64(chunkBlob);
+    // PUT one chunk of raw bytes straight to Drive. Resolves with the HTTP
+    // status code; onProgress(loadedBytes) fires as the chunk uploads.
+    function putChunk(uploadUrl, chunkBlob, start, end, total, onProgress) {
       return new Promise((resolve, reject) => {
-        google.script.run
-          .withSuccessHandler((result) => {
-            if (result.success) resolve(result);
-            else reject(new Error(result.error || 'Chunk upload failed'));
-          })
-          .withFailureHandler((err) => reject(err))
-          .uploadChunkProxy(uploadUrl, base64, start, end, total);
-      });
-    }
-
-    function blobToBase64(blob) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-          // Strip data URL prefix
-          const base64 = reader.result.split(',')[1];
-          resolve(base64);
-        };
-        reader.onerror = () => reject(new Error('Failed to read chunk'));
-        reader.readAsDataURL(blob);
-      });
-    }
-
-    /**
-     * Ask Drive how many bytes it has received so far.
-     * Send a PUT with Content-Range: bytes * / <total> and zero body.
-     * Response's Range header tells us: "bytes=0-N" means N+1 bytes received.
-     * We use no-cors so we can't read headers directly — but we can make
-     * the request via a proxy in Apps Script if needed. Simpler: assume
-     * that if the chunk send didn't throw, it worked, and only verify at the end.
-     *
-     * Actually: fetch in no-cors mode returns an opaque response. But we can
-     * make a status-check request from the server (Apps Script) which CAN read
-     * headers. That's what we do here.
-     */
-    async function queryUploadStatus(uploadUrl, totalSize) {
-      return new Promise((resolve, reject) => {
-        google.script.run
-          .withSuccessHandler((result) => {
-            if (result.success) resolve(result.bytesReceived);
-            else reject(new Error(result.error || 'Status query failed'));
-          })
-          .withFailureHandler((err) => reject(err))
-          .checkUploadStatus(uploadUrl, totalSize);
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', uploadUrl, true);
+        xhr.setRequestHeader('Content-Range', 'bytes ' + start + '-' + end + '/' + total);
+        if (xhr.upload && onProgress) {
+          xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
+        }
+        xhr.onload = () => resolve(xhr.status);
+        xhr.onerror = () => reject(new Error('Network error during upload'));
+        xhr.ontimeout = () => reject(new Error('Upload timed out'));
+        xhr.send(chunkBlob);
       });
     }
 
@@ -957,15 +937,9 @@
     }
 
     function loadSlideIds() {
-      return new Promise((resolve) => {
-        google.script.run
-          .withSuccessHandler((result) => {
-            if (result && result.success) slideIds = result.ids || [];
-            resolve();
-          })
-          .withFailureHandler(() => resolve())
-          .getSlideshowPhotos();
-      });
+      return jsonp('listPhotos', {})
+        .then((result) => { if (result && result.success) slideIds = result.ids || []; })
+        .catch(() => {});
     }
 
     function shuffle(arr) {
@@ -1023,12 +997,9 @@
     }
 
     function fetchSlideImage(id) {
-      return new Promise((resolve) => {
-        google.script.run
-          .withSuccessHandler((result) => resolve(result && result.success ? result.dataUrl : null))
-          .withFailureHandler(() => resolve(null))
-          .getSlideshowImage(id);
-      });
+      return jsonp('photo', { id: id })
+        .then((result) => (result && result.success ? result.dataUrl : null))
+        .catch(() => null);
     }
 
     function preloadImage(dataUrl) {

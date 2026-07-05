@@ -22,91 +22,56 @@ const MAX_UPLOADS_PER_HOUR = 50;
 // =======================================
 
 /**
- * Serves the HTML page.
+ * JSONP API entry point.
+ *
+ * The web page now lives on a normal static host (so the browser can upload
+ * straight to Drive — much faster than proxying through here). That page can't
+ * use google.script.run anymore, so instead it calls this endpoint with a
+ * ?callback= parameter and we reply as JSONP, which needs no CORS setup.
+ *
+ * Supported actions (all via GET query parameters):
+ *   ?action=createSession&fileName=..&mimeType=..&fileSize=..&uploaderName=..
+ *   ?action=listPhotos
+ *   ?action=photo&id=FILE_ID
  */
-function doGet() {
-  return HtmlService.createHtmlOutputFromFile('Index')
-    .setTitle('Share Your Wedding Memories')
-    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+function doGet(e) {
+  const params = (e && e.parameter) || {};
+  const action = params.action || '';
+  let result;
+
+  try {
+    if (action === 'createSession') {
+      result = createUploadSession({
+        fileName: params.fileName,
+        mimeType: params.mimeType,
+        fileSize: Number(params.fileSize),
+        uploaderName: params.uploaderName || ''
+      });
+    } else if (action === 'listPhotos') {
+      result = getSlideshowPhotos();
+    } else if (action === 'photo') {
+      result = getSlideshowImage(params.id);
+    } else {
+      result = { success: false, error: 'Unknown action: ' + action };
+    }
+  } catch (error) {
+    result = { success: false, error: 'Server error: ' + error.message };
+  }
+
+  return jsonpOutput(params.callback, result);
 }
 
 /**
- * Called by the frontend after each chunk to verify how many bytes Drive received.
- * Uses the Drive resumable upload status query protocol.
- * Returns { success: true, bytesReceived: N } where N is the number of bytes
- * Drive currently has, or the total size if the upload is complete.
+ * Wraps a result object as a JSONP response (or plain JSON if no callback).
  */
-function checkUploadStatus(uploadUrl, totalSize) {
-  try {
-    const response = UrlFetchApp.fetch(uploadUrl, {
-      method: 'put',
-      headers: {
-        'Content-Range': 'bytes */' + totalSize,
-        'Content-Length': '0'
-      },
-      muteHttpExceptions: true
-    });
-
-    const code = response.getResponseCode();
-
-    // 200 or 201 = upload complete
-    if (code === 200 || code === 201) {
-      return { success: true, bytesReceived: totalSize };
-    }
-
-    // 308 = incomplete, check Range header for how much was received
-    if (code === 308) {
-      const headers = response.getHeaders();
-      const range = headers['Range'] || headers['range'] || '';
-      // Range format: "bytes=0-N" — means bytes 0 through N received (N+1 total)
-      const match = range.match(/bytes=0-(\d+)/);
-      if (match) {
-        return { success: true, bytesReceived: parseInt(match[1]) + 1 };
-      }
-      // No range header = 0 bytes received yet
-      return { success: true, bytesReceived: 0 };
-    }
-
-    return {
-      success: false,
-      error: 'Unexpected status: ' + code + ' - ' + response.getContentText().substring(0, 200)
-    };
-  } catch (error) {
-    return { success: false, error: 'Status check failed: ' + error.message };
+function jsonpOutput(callback, obj) {
+  const json = JSON.stringify(obj);
+  if (callback && /^[A-Za-z_$][\w$]*$/.test(callback)) {
+    return ContentService.createTextOutput(callback + '(' + json + ')')
+      .setMimeType(ContentService.MimeType.JAVASCRIPT);
   }
-}
-
-/**
- * Proxies a chunk upload from the browser to Drive.
- * The browser can't PUT directly to googleapis.com due to CORS,
- * so it sends the chunk (base64-encoded) to us and we forward it.
- */
-function uploadChunkProxy(uploadUrl, base64Data, start, end, total) {
-  try {
-    const bytes = Utilities.base64Decode(base64Data);
-    const response = UrlFetchApp.fetch(uploadUrl, {
-      method: 'put',
-      contentType: 'application/octet-stream',
-      headers: {
-        'Content-Range': 'bytes ' + start + '-' + end + '/' + total
-      },
-      payload: bytes,
-      muteHttpExceptions: true
-    });
-
-    const code = response.getResponseCode();
-    // 200/201 = whole file complete, 308 = chunk accepted more to come
-    if (code === 200 || code === 201 || code === 308) {
-      return { success: true, status: code };
-    }
-    return {
-      success: false,
-      error: 'Drive returned ' + code + ': ' + response.getContentText().substring(0, 200)
-    };
-  } catch (error) {
-    return { success: false, error: 'Proxy error: ' + error.message };
-  }
+  return ContentService.createTextOutput(json)
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 /**
