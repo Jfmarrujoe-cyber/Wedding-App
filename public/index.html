@@ -785,23 +785,30 @@
         let lastError = null;
 
         while (attempt < MAX_RETRIES && status === 0) {
-          try {
-            status = await putChunk(uploadUrl, chunk, chunkStart, end - 1, totalSize, (loaded) => {
-              // Live progress within this chunk.
-              item.progress = ((chunkStart + loaded) / totalSize) * 100;
-              updateFileProgress(item);
-            });
-            // 200/201 = whole file done, 308 = chunk accepted, keep going.
-            if (status !== 200 && status !== 201 && status !== 308) {
-              throw new Error('Drive responded ' + status);
-            }
-          } catch (err) {
-            lastError = err;
-            status = 0;
-            attempt++;
-            if (attempt < MAX_RETRIES) {
-              await sleep(1000 * Math.pow(2, attempt - 1));
-            }
+          const res = await putChunk(uploadUrl, chunk, chunkStart, end - 1, totalSize, (loaded) => {
+            // Live progress within this chunk.
+            item.progress = ((chunkStart + loaded) / totalSize) * 100;
+            updateFileProgress(item);
+          }).catch((err) => ({ status: -1, error: err.message }));
+
+          // 200/201 = whole file done, 308 = chunk accepted, keep going.
+          if (res.status === 200 || res.status === 201 || res.status === 308) {
+            status = res.status;
+            break;
+          }
+
+          lastError = new Error('Drive responded ' + (res.status === -1 ? 'network error' : res.status) +
+            (res.error ? ': ' + res.error : ''));
+
+          // Only retry transient failures. A 403/400/404 is a config/permission
+          // problem that won't fix itself — fail fast so the real error shows.
+          const s = res.status;
+          const retryable = (s === -1 || s === 408 || s === 429 || s >= 500);
+          if (!retryable) throw lastError;
+
+          attempt++;
+          if (attempt < MAX_RETRIES) {
+            await sleep(1000 * Math.pow(2, attempt - 1));
           }
         }
 
@@ -841,13 +848,15 @@
           xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
         }
         xhr.onload = () => {
-          // The Worker replies { success, driveStatus }. Use Drive's status.
+          // The Worker replies { success, driveStatus, driveError }.
           let status = xhr.status;
+          let error = '';
           try {
             const j = JSON.parse(xhr.responseText);
             if (j && typeof j.driveStatus === 'number') status = j.driveStatus;
+            if (j && j.driveError) error = j.driveError;
           } catch (e) {}
-          resolve(status);
+          resolve({ status: status, error: error });
         };
         xhr.onerror = () => reject(new Error('Network error during upload'));
         xhr.ontimeout = () => reject(new Error('Upload timed out'));

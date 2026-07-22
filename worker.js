@@ -91,8 +91,15 @@ async function proxyChunk(request, url) {
 
   const body = await request.arrayBuffer();
   const driveResp = await fetch(target, { method: 'PUT', headers: headers, body: body });
+  const status = driveResp.status;
 
-  return json({ success: true, driveStatus: driveResp.status });
+  // On an error status, capture Drive's explanation so the browser can show it.
+  let driveError = '';
+  if (status !== 200 && status !== 201 && status !== 308) {
+    driveError = (await driveResp.text()).slice(0, 500);
+  }
+
+  return json({ success: true, driveStatus: status, driveError: driveError });
 }
 
 async function createSession(env, params) {
