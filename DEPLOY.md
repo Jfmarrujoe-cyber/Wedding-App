@@ -1,78 +1,73 @@
 # Deploy guide — Wedding Media Uploader
 
-The app has two pieces:
+Everything runs on **one Cloudflare Worker**, connected to this GitHub repo:
 
-1. **`worker.js`** → a **Cloudflare Worker** (free). It holds your Google
-   service-account credentials and hands the web page short-lived Drive upload
-   links + the slideshow photos. Your secret key lives only here.
-2. **`index.html`** → the web page guests see, hosted on **GitHub Pages** (free).
-   The browser uploads files **straight to Google Drive** — fast, no middleman.
+- `public/index.html` — the web page guests see (served by the Worker).
+- `worker.js` — the backend: talks to Google Drive with your service account
+  and mints upload links. Your secret key lives only in Cloudflare.
+- `wrangler.jsonc` — tells Cloudflare how to deploy the two together.
 
-Uploaded files land in your Drive shared drive exactly as before.
+Because the page and backend share one address, there's **no URL to paste and
+no CORS to worry about**. And once it's connected to GitHub, **every push
+auto-deploys** — no more copy-pasting code into dashboards.
+
+Uploaded files land in your Google Drive shared drive. The browser uploads
+straight to Drive, so big videos are fast.
 
 ---
 
-## Part A — Put up the Cloudflare Worker
+## One-time setup
 
-You'll need three values you already used in Apps Script. Find them in Apps Script
-→ **Project Settings → Script Properties** (or in your service-account JSON file):
+### What you'll need first
+Three values (the same ones you used in Apps Script — find them in Apps Script →
+**Project Settings → Script Properties**, or in your service-account JSON file):
 `FOLDER_ID`, `SERVICE_ACCOUNT_EMAIL`, `SERVICE_ACCOUNT_PRIVATE_KEY`.
 
+### Step 1 — Connect the repo to Cloudflare
 1. Make a free account at **cloudflare.com** and sign in.
-2. Left sidebar → **Workers & Pages** → **Create application** → **Create Worker**.
-3. Give it a name like **`wedding-uploader`** → **Deploy** (this makes a starter worker).
-4. Click **Edit code**. Select everything, delete it, and paste in the full contents
-   of **`worker.js`** from this repo. Click **Deploy** (top right).
-5. Click **← (back)** to the worker, then **Settings → Variables and Secrets**.
-   Add these three (click **+ Add**), then **Save and deploy**:
+2. Left sidebar → **Workers & Pages** → **Create** → the **Import a repository** tab.
+3. Click **Connect GitHub**, authorize Cloudflare, and pick the repo
+   **`Jfmarrujoe-cyber/wedding-app`**.
+4. Cloudflare reads `wrangler.jsonc` automatically. Leave the build settings at their
+   defaults and click **Create and deploy**. (The first deploy will run but won't
+   fully work until Step 2 adds the secrets — that's expected.)
+
+### Step 2 — Add your three secrets
+1. Open the new Worker → **Settings → Variables and Secrets** → **Add**:
    | Name | Value | Type |
    |------|-------|------|
    | `FOLDER_ID` | your shared drive ID (e.g. `0ABooH9szrxV4Uk9PVA`) | Text |
    | `SERVICE_ACCOUNT_EMAIL` | `wedding-uploader@…iam.gserviceaccount.com` | Text |
-   | `SERVICE_ACCOUNT_PRIVATE_KEY` | the whole `private_key` value, including the `-----BEGIN…` / `…END-----` lines | **Secret** (Encrypt) |
-6. At the top of the worker page, copy its URL. It looks like:
-   **`https://wedding-uploader.YOURNAME.workers.dev`**
-7. **Quick test:** open **`https://wedding-uploader.YOURNAME.workers.dev/listPhotos`**
-   in your browser. You should see something like `{"success":true,"ids":[...]}`.
-   If you see an error about credentials, re-check the three variables in step 5.
+   | `SERVICE_ACCOUNT_PRIVATE_KEY` | the whole `private_key` value, including the `-----BEGIN…END-----` lines | **Secret** |
+2. Click **Deploy** (or **Save and deploy**) so the secrets take effect.
 
-## Part B — Put the page on GitHub Pages
-
-1. Put your Worker URL into `index.html`: find the line
-   `const WORKER_URL = 'PASTE_YOUR_CLOUDFLARE_WORKER_URL_HERE';`
-   and replace the placeholder with your worker URL (keep the quotes, no trailing slash).
-   _Or just send the Worker URL to me and I'll paste it in and push._
-2. Get that change onto your **main** branch (I can merge it for you).
-3. On GitHub: your repo → **Settings → Pages**.
-4. Under **Source**, choose **Deploy from a branch** → Branch **`main`** / **`/ (root)`** → **Save**.
-   (If GitHub says Pages needs a public repo, make the repo public — it's safe, there
-   are **no passwords or keys in this repo**; the secret key lives only in Cloudflare.)
-5. Wait ~1 minute. GitHub shows **"Your site is live at
-   `https://YOURNAME.github.io/wedding-app/`"** — that's your guest link.
-
-## Part C — Test
-
-1. Open your GitHub Pages link.
-2. Upload a big video — it should be **much** faster now, with a smooth progress bar.
-3. Click **View the Slideshow** to confirm photos appear.
+### Step 3 — Get your link and test
+1. At the top of the Worker page, find its URL:
+   **`https://wedding-uploader.YOURNAME.workers.dev`** — this is your guest link.
+2. **Test the backend:** open `…workers.dev/listPhotos`. You should see
+   `{"success":true,"ids":[...]}`. (If it mentions credentials, re-check Step 2.)
+3. **Test the page:** open the main `…workers.dev` link, upload a big video (should be
+   fast, with a smooth progress bar), and try **View the Slideshow**.
 
 ---
 
-## Changing things later
+## From now on: automatic deploys
 
-- Changed **`worker.js`?** → paste it into the Cloudflare editor again and **Deploy**.
-- Changed **`index.html`?** → push to `main`; GitHub Pages redeploys automatically.
-- New Worker name/URL? → update `WORKER_URL` in `index.html` and push.
+Because Cloudflare is connected to GitHub, **any change pushed to the `main` branch
+deploys itself** within a minute — whether it's the page (`public/index.html`) or the
+backend (`worker.js`). You (or I) just push; Cloudflare does the rest. You never have
+to paste code into the dashboard again. (You only revisit the dashboard to change a
+secret.)
+
+## Custom domain (optional, later)
+Worker → **Settings → Domains & Routes → Add** → **Custom domain** → e.g.
+`photos.wedding.com`. If your domain's DNS is on Cloudflare, this is a couple of clicks.
 
 ## Make a QR code
-
-Once you're happy with the GitHub Pages link, paste it into any QR-code generator to
-print on your wedding signage.
+Once you're happy with the link, paste it into any QR-code generator for your signage.
 
 ## Notes
-
-- The Worker currently accepts calls from any website (`Access-Control-Allow-Origin: *`).
-  That's fine for a wedding. If you later want to lock it to only your site, change that
-  line in `worker.js` to your GitHub Pages URL.
-- The old Google Apps Script backend was removed (it's still in this repo's git history
-  if you ever need it). Cloudflare is the backend now.
+- The Worker allows calls from any site (`Access-Control-Allow-Origin: *`) — fine for a
+  wedding, and harmless since the page is same-origin anyway.
+- The old Google Apps Script backend was removed; it's still in this repo's git history
+  if ever needed.

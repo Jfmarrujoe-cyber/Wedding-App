@@ -519,11 +519,12 @@
 
   <script>
     // ============================================================
-    //  CONFIGURATION — paste your Cloudflare Worker URL here.
-    //  It looks like: https://wedding-uploader.YOURNAME.workers.dev
-    //  (no trailing slash). See DEPLOY.md for how to get it.
+    //  The page and the backend run on the SAME Cloudflare Worker,
+    //  so we call it with same-origin paths (e.g. "/createSession").
+    //  Leave this as an empty string. (Only set it to a full
+    //  https://... URL if you ever host the page somewhere else.)
     // ============================================================
-    const WORKER_URL = 'PASTE_YOUR_CLOUDFLARE_WORKER_URL_HERE';
+    const WORKER_URL = '';
 
     const dropZone = document.getElementById('dropZone');
     const fileInput = document.getElementById('fileInput');

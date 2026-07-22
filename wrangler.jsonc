@@ -1,0 +1,14 @@
+{
+  // Cloudflare Worker config. This tells Cloudflare how to deploy the app
+  // when it builds from GitHub:
+  //   - "main" is the backend code (talks to Google Drive)
+  //   - "assets" is the folder with the web page, which the same Worker serves
+  // Requests that match a file in ./public are served as-is (the web page);
+  // everything else (e.g. /createSession, /listPhotos, /photo) runs the Worker.
+  "name": "wedding-uploader",
+  "main": "worker.js",
+  "compatibility_date": "2025-06-01",
+  "assets": {
+    "directory": "./public"
+  }
+}
