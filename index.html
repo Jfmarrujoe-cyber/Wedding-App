@@ -519,11 +519,11 @@
 
   <script>
     // ============================================================
-    //  CONFIGURATION — paste your Apps Script web app URL here.
-    //  Get it from: Apps Script → Deploy → Manage deployments →
-    //  copy the Web app URL (it ends in "/exec").
+    //  CONFIGURATION — paste your Cloudflare Worker URL here.
+    //  It looks like: https://wedding-uploader.YOURNAME.workers.dev
+    //  (no trailing slash). See DEPLOY.md for how to get it.
     // ============================================================
-    const API_URL = 'PASTE_YOUR_APPS_SCRIPT_EXEC_URL_HERE';
+    const WORKER_URL = 'PASTE_YOUR_CLOUDFLARE_WORKER_URL_HERE';
 
     const dropZone = document.getElementById('dropZone');
     const fileInput = document.getElementById('fileInput');
@@ -542,29 +542,19 @@
     const CHUNK_SIZE = 16 * 1024 * 1024; // 16 MB
     const MAX_RETRIES = 5;
 
-    // ---- JSONP helper: calls the Apps Script API without CORS headaches ----
-    let _jsonpCounter = 0;
-    function jsonp(action, params) {
-      return new Promise((resolve, reject) => {
-        const cbName = '__jsonp_cb_' + (++_jsonpCounter);
-        const script = document.createElement('script');
-        let timer;
-        function cleanup() {
-          clearTimeout(timer);
-          delete window[cbName];
-          if (script.parentNode) script.parentNode.removeChild(script);
-        }
-        window[cbName] = (data) => { cleanup(); resolve(data); };
-        script.onerror = () => { cleanup(); reject(new Error('Could not reach the server')); };
-        timer = setTimeout(() => { cleanup(); reject(new Error('The server took too long to respond')); }, 60000);
+    // ---- API helper: calls the Cloudflare Worker (which sends CORS headers) ----
+    function apiGet(path, params) {
+      const query = Object.keys(params || {})
+        .map(k => encodeURIComponent(k) + '=' + encodeURIComponent(params[k]))
+        .join('&');
+      return fetch(WORKER_URL + path + (query ? '?' + query : ''))
+        .then(r => r.json());
+    }
 
-        const query = Object.keys(params || {})
-          .map(k => encodeURIComponent(k) + '=' + encodeURIComponent(params[k]))
-          .join('&');
-        script.src = API_URL + '?action=' + encodeURIComponent(action) +
-          (query ? '&' + query : '') + '&callback=' + cbName;
-        document.body.appendChild(script);
-      });
+    // The Worker streams each photo's image bytes at this URL — usable directly
+    // as an <img>/background-image source (with browser caching).
+    function photoUrl(id) {
+      return WORKER_URL + '/photo?id=' + encodeURIComponent(id);
     }
 
     // How many photos to upload at once. Photos are small and latency-bound,
@@ -824,9 +814,9 @@
       }
     }
 
-    // Ask the API to mint a Drive resumable upload session.
+    // Ask the Worker to mint a Drive resumable upload session.
     function getUploadSession(file) {
-      return jsonp('createSession', {
+      return apiGet('/createSession', {
         fileName: file.name,
         mimeType: file.type || 'application/octet-stream',
         fileSize: file.size,
@@ -871,11 +861,10 @@
     //  Slideshow — shows the uploaded photos in a random order.
     //  Photos live in a private shared drive, so we can't point an
     //  <img> straight at them; the server hands us each photo as a
-    //  data URL (see getSlideshowImage in Code.gs).
+    //  Worker (see /photo in worker.js), which the browser can load directly.
     // ============================================================
     const SLIDE_INTERVAL = 6000;              // how long each photo is shown (ms)
     const SLIDE_REFRESH_INTERVAL = 3 * 60000; // re-check for newly uploaded photos (ms)
-    const SLIDE_CACHE_MAX = 40;               // how many photos to keep in memory
 
     const slideshow = document.getElementById('slideshow');
     const slideshowStart = document.getElementById('slideshowStart');
@@ -889,9 +878,8 @@
     let slideTimer = null;
     let slideRefreshTimer = null;
     let slideRunning = false;
-    let pendingImage = null;    // prefetch of the next photo
-    let slideAdvancing = false; // guard against overlapping ticks on a slow fetch
-    const slideCache = new Map();
+    let pendingImage = null;    // {id, url} chosen for the next tick
+    let slideAdvancing = false; // guard against overlapping ticks
 
     slideshowStart.addEventListener('click', openSlideshow);
     slideshowExit.addEventListener('click', closeSlideshow);
@@ -937,7 +925,7 @@
     }
 
     function loadSlideIds() {
-      return jsonp('listPhotos', {})
+      return apiGet('/listPhotos', {})
         .then((result) => { if (result && result.success) slideIds = result.ids || []; })
         .catch(() => {});
     }
@@ -958,36 +946,27 @@
       return slideQueue.shift();
     }
 
-    // Prefetch the next photo while the current one is on screen, so the
-    // crossfade is instant instead of waiting on the server each time.
+    // Pick the next photo's URL. The Worker serves each photo at a stable URL,
+    // so we just point at it and let the browser fetch + cache it.
     function queueNextImage() {
       const id = nextSlideId();
-      if (!id) { pendingImage = Promise.resolve(null); return; }
-      const cached = slideCache.get(id);
-      if (cached) { pendingImage = Promise.resolve({ id: id, dataUrl: cached }); return; }
-      pendingImage = fetchSlideImage(id).then((dataUrl) => {
-        if (!dataUrl) return null;
-        slideCache.set(id, dataUrl);
-        if (slideCache.size > SLIDE_CACHE_MAX) {
-          slideCache.delete(slideCache.keys().next().value);
-        }
-        return { id: id, dataUrl: dataUrl };
-      });
+      pendingImage = id ? { id: id, url: photoUrl(id) } : null;
     }
 
     async function advanceSlide() {
       if (!slideRunning || slideAdvancing) return;
       slideAdvancing = true;
       try {
-        const ready = await pendingImage; // photo prefetched last tick
-        queueNextImage();                 // start prefetching the following one
-        if (!slideRunning || !ready) return; // skip a failed fetch; try again next tick
+        const ready = pendingImage;  // chosen last tick
+        queueNextImage();            // choose the following one
+        if (!slideRunning || !ready) return;
 
-        await preloadImage(ready.dataUrl);
-        if (!slideRunning) return;
+        // Preload before crossfading so the image is ready when it fades in.
+        const loaded = await preloadImage(ready.url);
+        if (!slideRunning || !loaded) return; // skip a failed load; try again next tick
 
         const nextLayer = 1 - slideActiveLayer;
-        slideLayers[nextLayer].style.backgroundImage = 'url("' + ready.dataUrl + '")';
+        slideLayers[nextLayer].style.backgroundImage = 'url("' + ready.url + '")';
         slideLayers[nextLayer].classList.add('visible');
         slideLayers[slideActiveLayer].classList.remove('visible');
         slideActiveLayer = nextLayer;
@@ -996,17 +975,12 @@
       }
     }
 
-    function fetchSlideImage(id) {
-      return jsonp('photo', { id: id })
-        .then((result) => (result && result.success ? result.dataUrl : null))
-        .catch(() => null);
-    }
-
-    function preloadImage(dataUrl) {
+    function preloadImage(url) {
       return new Promise((resolve) => {
         const img = new Image();
-        img.onload = img.onerror = () => resolve();
-        img.src = dataUrl;
+        img.onload = () => resolve(true);
+        img.onerror = () => resolve(false);
+        img.src = url;
       });
     }
   </script>
