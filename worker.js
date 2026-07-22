@@ -38,6 +38,10 @@ export default {
     const path = url.pathname;
 
     try {
+      if (path.endsWith('/put') && request.method === 'PUT') {
+        return await proxyChunk(request, url);
+      }
+
       if (path.endsWith('/createSession')) {
         const params = Object.fromEntries(url.searchParams);
         return json(await createSession(env, params));
@@ -69,6 +73,27 @@ export default {
 // ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
+
+// Forwards one upload chunk from the browser to Drive's resumable session URL.
+// The browser can't PUT to that URL directly (Drive doesn't send CORS headers
+// on it), but it can PUT to us (same origin), and we forward it server-side.
+// We return Drive's status code (200/201 = done, 308 = more to come) as JSON.
+async function proxyChunk(request, url) {
+  const target = url.searchParams.get('target') || '';
+  // Only ever forward to Google's upload endpoint (never an open proxy).
+  if (!target.startsWith('https://www.googleapis.com/upload/')) {
+    return json({ success: false, error: 'Invalid upload target.' }, 400);
+  }
+
+  const headers = {};
+  const contentRange = request.headers.get('Content-Range');
+  if (contentRange) headers['Content-Range'] = contentRange;
+
+  const body = await request.arrayBuffer();
+  const driveResp = await fetch(target, { method: 'PUT', headers: headers, body: body });
+
+  return json({ success: true, driveStatus: driveResp.status });
+}
 
 async function createSession(env, params) {
   if (!env.FOLDER_ID) return { success: false, error: 'Worker not configured (missing FOLDER_ID).' };

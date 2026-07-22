@@ -760,11 +760,11 @@
     }
 
     /**
-     * Resumable chunked upload — the fast path.
-     *   1. Ask the Apps Script API (JSONP) for a fresh Drive upload URL.
-     *   2. PUT each chunk of raw bytes DIRECTLY to Drive from the browser.
-     *      No base64, no proxy, no double-hop. Drive replies 200/201 when the
-     *      whole file is done and 308 ("resume incomplete") after each chunk.
+     * Resumable chunked upload.
+     *   1. Ask the Worker for a fresh Drive upload session URL.
+     *   2. PUT each chunk of raw bytes to the Worker, which forwards it to Drive
+     *      (Drive won't accept the browser's PUT directly — no CORS). Drive replies
+     *      200/201 when the whole file is done and 308 after each chunk.
      *   xhr.upload.onprogress gives us a real, smooth progress bar.
      */
     async function uploadFileResumable(item) {
@@ -828,17 +828,27 @@
       });
     }
 
-    // PUT one chunk of raw bytes straight to Drive. Resolves with the HTTP
-    // status code; onProgress(loadedBytes) fires as the chunk uploads.
+    // PUT one chunk of raw bytes. Drive blocks direct browser PUTs to its upload
+    // session (no CORS), so we send the chunk to our own Worker (same origin) and
+    // it forwards to Drive. Resolves with Drive's status code (200/201 = done,
+    // 308 = more to come); onProgress(loadedBytes) fires as the chunk uploads.
     function putChunk(uploadUrl, chunkBlob, start, end, total, onProgress) {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open('PUT', uploadUrl, true);
+        xhr.open('PUT', WORKER_URL + '/put?target=' + encodeURIComponent(uploadUrl), true);
         xhr.setRequestHeader('Content-Range', 'bytes ' + start + '-' + end + '/' + total);
         if (xhr.upload && onProgress) {
           xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
         }
-        xhr.onload = () => resolve(xhr.status);
+        xhr.onload = () => {
+          // The Worker replies { success, driveStatus }. Use Drive's status.
+          let status = xhr.status;
+          try {
+            const j = JSON.parse(xhr.responseText);
+            if (j && typeof j.driveStatus === 'number') status = j.driveStatus;
+          } catch (e) {}
+          resolve(status);
+        };
         xhr.onerror = () => reject(new Error('Network error during upload'));
         xhr.ontimeout = () => reject(new Error('Upload timed out'));
         xhr.send(chunkBlob);
