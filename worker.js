@@ -47,6 +47,10 @@ export default {
         return json(await createSession(env, params));
       }
 
+      if (path.endsWith('/drives')) {
+        return json(await listDrives(env));
+      }
+
       if (path.endsWith('/listPhotos')) {
         return json(await listPhotos(env));
       }
@@ -130,6 +134,26 @@ async function createSession(env, params) {
   if (!uploadUrl) return { success: false, error: 'Drive did not return an upload URL.' };
 
   return { success: true, uploadUrl: uploadUrl, fileName: fileName };
+}
+
+// Diagnostic: lists every Shared Drive the service account can actually see.
+// Open /drives in a browser to check whether your target drive is in the list.
+async function listDrives(env) {
+  const token = await getAccessToken(env);
+  const resp = await fetch(
+    'https://www.googleapis.com/drive/v3/drives?pageSize=100&fields=drives(id,name)',
+    { headers: { 'Authorization': 'Bearer ' + token } }
+  );
+  const data = await resp.json();
+  if (resp.status !== 200) {
+    return { success: false, status: resp.status, error: JSON.stringify(data).slice(0, 300) };
+  }
+  return {
+    success: true,
+    configuredFolderId: env.FOLDER_ID || '(not set)',
+    serviceAccount: env.SERVICE_ACCOUNT_EMAIL || '(not set)',
+    drivesTheServiceAccountCanSee: data.drives || []
+  };
 }
 
 async function listPhotos(env) {
