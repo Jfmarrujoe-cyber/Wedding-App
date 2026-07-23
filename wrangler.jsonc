@@ -5,7 +5,7 @@
   //   - "assets" is the folder with the web page, which the same Worker serves
   // Requests that match a file in ./public are served as-is (the web page);
   // everything else (e.g. /createSession, /listPhotos, /photo) runs the Worker.
-  "name": "wedding-uploader",
+  "name": "weddingapp",
   "main": "worker.js",
   "compatibility_date": "2025-06-01",
   "assets": {
