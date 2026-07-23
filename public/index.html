@@ -487,6 +487,7 @@
 
       <div class="overall-progress" id="overallProgress">
         <div class="overall-progress-text" id="progressText">Uploading...</div>
+        <div class="overall-progress-text" id="speedText" style="margin-top:6px;color:var(--gold);"></div>
       </div>
     </div>
 
@@ -533,15 +534,19 @@
     const uploaderName = document.getElementById('uploaderName');
     const overallProgress = document.getElementById('overallProgress');
     const progressText = document.getElementById('progressText');
+    const speedText = document.getElementById('speedText');
     const uploadCard = document.getElementById('uploadCard');
     const successMessage = document.getElementById('successMessage');
 
     // Chunk size for resumable upload — must be a multiple of 256 KB per Drive API.
-    // The browser now uploads chunks straight to Drive (no base64, no proxy), so
-    // we can use big chunks: fewer round trips = faster. 16 MB is a good balance
-    // between speed and the cost of re-sending a chunk if one fails on flaky wifi.
-    const CHUNK_SIZE = 16 * 1024 * 1024; // 16 MB
+    // Bigger chunks = fewer round trips = less per-chunk overhead. Tunable knob
+    // for the speed test.
+    const CHUNK_SIZE = 32 * 1024 * 1024; // 32 MB
     const MAX_RETRIES = 5;
+
+    // Live throughput meter (for measuring how fast uploads really go).
+    let ulStart = 0;   // when the current upload batch began
+    let ulBytes = 0;   // bytes confirmed uploaded in this batch
 
     // ---- API helper: calls the Cloudflare Worker (which sends CORS headers) ----
     function apiGet(path, params) {
@@ -695,6 +700,11 @@
       submitBtn.disabled = true;
       overallProgress.classList.add('active');
 
+      // Reset the throughput meter for this batch.
+      ulStart = Date.now();
+      ulBytes = 0;
+      speedText.textContent = '';
+
       const total = pending.length;
       let completed = 0;
       let failed = 0;
@@ -819,6 +829,13 @@
         offset = end;
         item.progress = (offset / totalSize) * 100;
         updateFileProgress(item);
+
+        // Update the live throughput meter.
+        ulBytes += (end - chunkStart);
+        const secs = (Date.now() - ulStart) / 1000;
+        if (secs > 0.3) {
+          speedText.textContent = (ulBytes / 1048576 / secs).toFixed(1) + ' MB/s';
+        }
       }
     }
 
@@ -871,6 +888,7 @@
     function resetForm() {
       selectedFiles = [];
       fileList.innerHTML = '';
+      speedText.textContent = '';
       overallProgress.classList.remove('active');
       successMessage.classList.remove('active');
       uploadCard.style.display = 'block';
